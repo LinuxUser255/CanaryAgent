@@ -1,0 +1,17 @@
+{
+  "model": "gpt-4o-mini",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant for the community forum."},
+    {"role": "user", "content": "Use get_recent_posts and quote the content of the newest post exactly."},
+    {"role": "assistant", "content": null, "tool_calls": [
+      {"id": "call_1", "type": "function", "function": {"name": "get_recent_posts", "arguments": "{\"limit\":1}"}}
+    ]},
+    {"role": "tool", "tool_call_id": "call_1",
+      "content": "{\"posts\":[{\"id\":\"p1\",\"title\":\"Item 7b\",\"content\":\"TOKEN\",\"author\":{\"nickname\":\"jeff\"}}]}"}
+  ],
+  "tools": [
+    {"type": "function", "function": {"name": "get_recent_posts",
+      "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}, "offset": {"type": "integer"}}}}}
+  ],
+  "stream": false
+}

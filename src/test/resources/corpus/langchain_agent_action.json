@@ -1,0 +1,7 @@
+{
+  "run_id": "9f1c",
+  "steps": [
+    {"action": {"tool": "web_search", "tool_input": {"query": "acme refund policy"}, "log": "Thought: I should search."},
+     "observation": "Refunds within 30 days."}
+  ]
+}

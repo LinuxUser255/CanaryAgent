@@ -1,0 +1,1 @@
+conversation_id=42&messages=%5B%7B%22role%22%3A%22user%22%2C%22content%22%3A%22hello%22%7D%5D&stream=true

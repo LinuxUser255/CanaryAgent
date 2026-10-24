@@ -1,0 +1,15 @@
+{
+  "model": "gpt-4o",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant for Acme docs."},
+    {"role": "user", "content": "Find the refund policy and email it to me."}
+  ],
+  "tools": [
+    {"type": "function", "function": {"name": "search_docs", "description": "Search the knowledge base",
+      "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "send_email",
+      "parameters": {"type": "object", "properties": {"to": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}}}}
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true
+}

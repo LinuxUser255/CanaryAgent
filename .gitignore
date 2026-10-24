@@ -1,0 +1,52 @@
+### Secrets / local data ###
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.burp
+captures/
+*.log
+
+### Gradle / build ###
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### Kotlin ###
+.kotlin/
+
+### JVM ###
+*.hprof
+hs_err_pid*
+replay_pid*
+
+### IntelliJ IDEA ###
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+!**/src/main/**/out/
+!**/src/test/**/out/
+
+### Other IDEs ###
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+bin/
+!**/src/main/**/bin/
+!**/src/test/**/bin/
+
+### Claude Code ###
+.claude/settings.local.json
+
+### macOS ###
+.DS_Store
+
+### CanaryAgent dev ###
+.selftest-build

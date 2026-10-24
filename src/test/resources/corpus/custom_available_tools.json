@@ -1,0 +1,11 @@
+{
+  "session": "s-1",
+  "available_tools": [
+    {"name": "create_ticket", "input_schema": {"type": "object", "properties": {"title": {}, "priority": {}}}},
+    {"name": "close_ticket", "input_schema": {"type": "object", "properties": {"id": {}}}}
+  ],
+  "history": [
+    {"role": "user", "text": "Open a ticket"},
+    {"role": "assistant", "text": "Sure"}
+  ]
+}

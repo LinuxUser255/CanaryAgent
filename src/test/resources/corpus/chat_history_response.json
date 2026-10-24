@@ -1,0 +1,8 @@
+{
+  "chat_history": [
+    {"id": 1, "role": "user", "content": "Hello, can you tell me the status of the mechanic report?"},
+    {"id": 2, "role": "assistant", "content": "To check the status I need the report ID. Could you provide it?"},
+    {"id": 3, "role": "user", "content": "Use get_recent_posts and quote the newest post."},
+    {"id": 4, "role": "assistant", "content": "The content of the newest post is: \"F4 test\"."}
+  ]
+}

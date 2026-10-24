@@ -1,0 +1,14 @@
+{
+  "model": "claude-sonnet-4-5",
+  "max_tokens": 1024,
+  "system": "You are a browsing agent.",
+  "tools": [
+    {"name": "fetch_url", "description": "Fetch a web page",
+     "input_schema": {"type": "object", "properties": {"url": {"type": "string"}, "timeout": {"type": "number"}}, "required": ["url"]}}
+  ],
+  "messages": [
+    {"role": "user", "content": "Summarise https://example.com/doc"},
+    {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01", "name": "fetch_url", "input": {"url": "https://example.com/doc"}}]},
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "<html>...</html>"}]}
+  ]
+}

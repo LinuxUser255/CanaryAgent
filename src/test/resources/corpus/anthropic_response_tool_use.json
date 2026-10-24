@@ -1,0 +1,10 @@
+{
+  "id": "msg_01",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {"type": "text", "text": "I'll look that up."},
+    {"type": "tool_use", "id": "toolu_02", "name": "lookup_customer", "input": {"email": "a@b.c", "include_orders": true}}
+  ],
+  "stop_reason": "tool_use"
+}

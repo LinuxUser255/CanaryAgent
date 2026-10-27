@@ -6,7 +6,12 @@ import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.RequestOptions
 import burp.api.montoya.http.message.HttpRequestResponse
 import burp.api.montoya.http.message.requests.HttpRequest
+import burp.api.montoya.scanner.AuditConfiguration
+import burp.api.montoya.scanner.BuiltInAuditConfiguration
+import burp.api.montoya.scanner.audit.issues.AuditIssue
+import burp.api.montoya.scanner.audit.issues.AuditIssueSeverity
 import burp.api.montoya.websocket.extension.ExtensionWebSocketCreationStatus
+import com.canaryagent.scanner.IssueRung
 import com.canaryagent.CanaryAgentRuntime
 import com.canaryagent.annotation.StreamingSettingsHint
 import com.canaryagent.collaborator.CollaboratorCorrelator
@@ -93,6 +98,10 @@ class SelfTestRunner(private val rt: CanaryAgentRuntime, private val report: (St
         }
         check("E1 streaming settings hint reads Burp's project options") { streamingSettings() }
         check("E2 persistence round trip through Burp's project store") { persistenceRoundTrip() }
+        // F1 must run before F2: F2 starts an audit, after which F1 could no longer tell default live
+        // tasks apart from the audit this self-test created.
+        check("F1 Scanner: passive check under default tasks for Proxy traffic (review #570)") { passiveCheckDefaultTasks() }
+        check("F2 Scanner: passive check raises an issue under a passive audit (review #570)") { passiveCheckUnderAudit() }
         val counts = Outcome.entries.associateWith { o -> results.count { it.outcome == o } }
         report("RESULT: ${counts[Outcome.PASS]} pass, ${counts[Outcome.FAIL]} fail, ${counts[Outcome.WARN]} warn, ${counts[Outcome.SKIP]} skip")
         return results.toList()
@@ -148,12 +157,19 @@ class SelfTestRunner(private val rt: CanaryAgentRuntime, private val report: (St
         // always needs "==".
         val value = Base64.getUrlEncoder().encodeToString("poll says $token".toByteArray())
         val get = HttpRequest.httpRequest(httpbin, "GET /base64/$value HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n")
+        // Hits are recorded off the handler thread (review #570 finding 3), so each read waits for the
+        // expected count and then settles, so a late extra count would still be seen.
+        fun countAfter(expected: Int): Int? {
+            await(token, TIMEOUT_MS) { it.hitCount >= expected }
+            Thread.sleep(SETTLE_MS)
+            return rt.tracker[token]?.hitCount
+        }
         rt.api.http().sendRequest(get, options)
-        val first = rt.tracker[token]?.hitCount ?: return fail("marker vanished")
+        val first = countAfter(1) ?: return fail("marker vanished")
         rt.api.http().sendRequest(get, options)
-        val repeat = rt.tracker[token]?.hitCount ?: return fail("marker vanished")
+        val repeat = countAfter(1) ?: return fail("marker vanished")
         post("""{"turn":2,"m":"$token"}""")
-        val changed = rt.tracker[token]?.hitCount ?: return fail("marker vanished")
+        val changed = countAfter(2) ?: return fail("marker vanished")
         return when {
             first != 1 -> fail("first fetch gave hitCount=$first (expected 1)")
             repeat != 1 -> fail("identical repeat raised hitCount to $repeat (F8)")
@@ -391,7 +407,8 @@ class SelfTestRunner(private val rt: CanaryAgentRuntime, private val report: (St
         val host = collaboratorHost ?: return skip("C1 did not run")
         val before = rt.tracker[id] ?: return fail("payload no longer tracked")
         post("""{"x":"$host"}""")
-        val after = rt.tracker[id] ?: return fail("payload vanished")
+        // Recording is deferred off the handler thread (review #570 finding 3): wait for it.
+        val after = await(id, TIMEOUT_MS) { it.hitCount > before.hitCount } ?: rt.tracker[id] ?: return fail("payload vanished")
         val problems = ArrayList<String>()
         if (after.hitCount <= before.hitCount) problems += "no in-band hit recorded"
         if (before.status == MarkerStatus.OOB_INTERACTION && after.status != MarkerStatus.OOB_INTERACTION) problems += "status demoted to ${after.status}"
@@ -540,7 +557,87 @@ class SelfTestRunner(private val rt: CanaryAgentRuntime, private val report: (St
         val raw = rt.settings.describe().substringAfter("interval=")
         val v = rt.settings.collaboratorIntervalSeconds
         val ok = v in CanaryAgentSettings.MIN_COLLABORATOR_INTERVAL.toLong()..CanaryAgentSettings.MAX_COLLABORATOR_INTERVAL.toLong()
-        return if (ok) pass("raw=$raw clamped=${v}s (read live before every poll)") else fail("interval=$v outside 5..300")
+        return if (ok) pass("raw=$raw clamped=${v}s (read live before every poll)")
+        else fail("interval=$v outside ${CanaryAgentSettings.MIN_COLLABORATOR_INTERVAL}..${CanaryAgentSettings.MAX_COLLABORATOR_INTERVAL}")
+    }
+
+    /** Issues the passive check raised for [url], read from Burp's site map. */
+    private fun markerIssuesFor(url: String): List<AuditIssue> {
+        val names = IssueRung.entries.map { it.issueName }.toSet()
+        return rt.api.siteMap().issues().filter { it.name() in names && it.baseUrl().startsWith(url) }
+    }
+
+    private fun awaitIssues(url: String, timeoutMs: Long): List<AuditIssue> {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline && !cancelled) {
+            markerIssuesFor(url).takeIf { it.isNotEmpty() }?.let { return it }
+            Thread.sleep(POLL_MS)
+        }
+        return emptyList()
+    }
+
+    /**
+     * Answers the open question for the review reply: does Burp call an extension passive check for
+     * plain Proxy traffic with no audit task created? Sends a marker through the listener (so it is Proxy
+     * traffic) and waits for one of the check's issues. Either outcome is information, so this never
+     * FAILs: PASS = the check fired under default tasks, WARN = it did not (what the reply claims).
+     */
+    private fun passiveCheckDefaultTasks(): Result {
+        if (!rt.capabilities.scannerAvailable) return skip("Scanner is Professional-only; edition ${rt.capabilities.edition}")
+        val token = newToken()
+        rt.tracker.place(token, MarkerKind.TOKEN, null)
+        val path = "/anything/f1-$token"
+        val raw = "POST http://httpbin.org$path HTTP/1.1\r\nHost: httpbin.org\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+        val rr = rt.api.http().sendRequest(HttpRequest.httpRequest(proxyService(), raw).withBody("""{"echo":"$token"}"""), options)
+        if (rr.response() == null) return skip("no response via $proxyListener; Proxy listener missing?")
+        val issues = awaitIssues("http://httpbin.org$path", PASSIVE_WAIT_MS)
+        return if (issues.isNotEmpty()) {
+            pass("FIRED without any audit task: ${issues.map { "${it.name()} [${it.severity()}]" }}")
+        } else {
+            warn("did NOT fire within ${PASSIVE_WAIT_MS / 1000}s for Proxy traffic with no audit task (default tasks do not run extension passive checks)")
+        }
+    }
+
+    /**
+     * Starts a passive-only audit on a message carrying a marker in a tool call, twice, and checks that
+     * the check is invoked, raises the High tool-call issue, and that Burp consolidates the repeat.
+     */
+    private fun passiveCheckUnderAudit(): Result {
+        if (!rt.capabilities.scannerAvailable) return skip("Scanner is Professional-only; edition ${rt.capabilities.edition}")
+        val token = newToken()
+        rt.tracker.place(token, MarkerKind.TOKEN, null)
+        val path = "/anything/f2-$token"
+        val body = """{"tool_calls":[{"function":{"name":"fetch","arguments":"{\"url\":\"$token\"}"}}]}"""
+        val raw = "POST $path HTTP/1.1\r\nHost: httpbin.org\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+        val rr = rt.api.http().sendRequest(HttpRequest.httpRequest(httpbin, raw).withBody(body), options)
+        if (rr.response() == null) return skip("no response from httpbin.org")
+        // Let the deferred recording of this send land first, so any later change is the audit's doing.
+        await(token, TIMEOUT_MS) { it.hitCount > 0 }
+        Thread.sleep(SETTLE_MS)
+        val hitsBefore = rt.tracker[token]?.hitCount ?: 0
+
+        val audit = rt.api.scanner().startAudit(AuditConfiguration.auditConfiguration(BuiltInAuditConfiguration.LEGACY_PASSIVE_AUDIT_CHECKS))
+        try {
+            audit.addRequestResponse(rr)
+            audit.addRequestResponse(rr)
+            val url = "https://httpbin.org$path"
+            val issues = awaitIssues(url, PASSIVE_WAIT_MS)
+            Thread.sleep(SETTLE_MS * 10)
+            val settled = markerIssuesFor(url)
+            if (issues.isEmpty()) return fail("no CanaryAgent issue after a passive audit (status: ${audit.statusMessage()})")
+            val high = settled.filter { it.name() == IssueRung.TOOL_CALL.issueName && it.severity() == AuditIssueSeverity.HIGH }
+            val hitsAfter = rt.tracker[token]?.hitCount ?: 0
+            val problems = buildList {
+                if (high.isEmpty()) add("no High tool-call issue (got ${settled.map { it.name() }})")
+                if (hitsAfter != hitsBefore) add("audit changed hit count $hitsBefore -> $hitsAfter (check must be read-only)")
+            }
+            val dedup = "same message audited twice -> ${high.size} High issue(s) in site map"
+            return if (problems.isEmpty()) {
+                if (high.size == 1) pass("invoked; $dedup; hit count unchanged") else warn("invoked; $dedup (expected 1 after consolidation)")
+            } else fail(problems.joinToString("; "))
+        } finally {
+            audit.delete()
+        }
     }
 
     // ---- helpers --------------------------------------------------------------------------------
@@ -623,5 +720,6 @@ class SelfTestRunner(private val rt: CanaryAgentRuntime, private val report: (St
         private const val COLLAB_TIMEOUT_MS = 45_000L
         const val POLL_MS = 250L
         const val SETTLE_MS = 300L
+        private const val PASSIVE_WAIT_MS = 30_000L
     }
 }

@@ -16,14 +16,18 @@ class BodyParser(private val maxChars: Int = DEFAULT_MAX_CHARS) {
         private val TEXT_LIKE = listOf("text/", "json", "x-www-form-urlencoded", "event-stream", "ndjson")
     }
 
-    /** Parsed roots (JSONObject / JSONArray). Empty when the body is too large, binary, or not structured. */
-    fun parse(body: String, contentType: String?): List<Any> {
+    /**
+     * Parsed roots (JSONObject / JSONArray). Empty when the body is too large, binary, or not structured.
+     * [precomputed] lets a caller that already ran [JsonSupport.parseFragments] on this body share that
+     * parse; every gate (content type, size, form handling) still applies exactly as without it.
+     */
+    fun parse(body: String, contentType: String?, precomputed: List<Any>? = null): List<Any> {
         if (body.isEmpty() || body.length > maxChars) return emptyList()
         if (!isTextLike(contentType)) return emptyList()
         val ct = contentType?.lowercase() ?: ""
         if (ct.contains("x-www-form-urlencoded")) return listOfNotNull(parseForm(body))
 
-        val fragments = JsonSupport.parseFragments(body)
+        val fragments = precomputed ?: JsonSupport.parseFragments(body)
         if (fragments.isNotEmpty()) return fragments
         if (ct.isEmpty() && looksLikeForm(body)) return listOfNotNull(parseForm(body))
         return emptyList()

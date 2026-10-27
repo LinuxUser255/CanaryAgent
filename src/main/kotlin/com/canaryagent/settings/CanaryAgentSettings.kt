@@ -27,9 +27,11 @@ class CanaryAgentSettings(private val api: MontoyaApi) : AnnotationSettings {
          * "no stored value" means persistence stays on.
          */
         const val NO_PERSIST = "Do not persist markers and tool inventory in the project"
-        const val COLLABORATOR_INTERVAL = "Collaborator polling interval in seconds (5-300)"
-        const val DEFAULT_COLLABORATOR_INTERVAL = 10
-        const val MIN_COLLABORATOR_INTERVAL = 5
+        const val COLLABORATOR_INTERVAL = "Collaborator polling interval in seconds (30-300)"
+        const val DEFAULT_COLLABORATOR_INTERVAL = 30
+
+        /** PortSwigger's recommended floor; values below it put unnecessary load on the Collaborator server. */
+        const val MIN_COLLABORATOR_INTERVAL = 30
         const val MAX_COLLABORATOR_INTERVAL = 300
     }
 

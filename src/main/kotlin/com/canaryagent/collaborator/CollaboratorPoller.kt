@@ -1,6 +1,7 @@
 package com.canaryagent.collaborator
 
 import com.canaryagent.markers.MarkerTracker
+import com.canaryagent.settings.CanaryAgentSettings
 import com.canaryagent.util.CanaryLog
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -20,7 +21,7 @@ class CollaboratorPoller(
     private val intervalSeconds: () -> Long = { DEFAULT_INTERVAL_SECONDS },
 ) {
     companion object {
-        const val DEFAULT_INTERVAL_SECONDS = 10L
+        const val DEFAULT_INTERVAL_SECONDS = 30L
     }
 
     private val executor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r ->
@@ -32,7 +33,14 @@ class CollaboratorPoller(
 
     private fun scheduleNext() {
         if (executor.isShutdown) return
-        val delay = try { intervalSeconds().coerceIn(5L, 300L) } catch (_: RuntimeException) { DEFAULT_INTERVAL_SECONDS }
+        val delay = try {
+            intervalSeconds().coerceIn(
+                CanaryAgentSettings.MIN_COLLABORATOR_INTERVAL.toLong(),
+                CanaryAgentSettings.MAX_COLLABORATOR_INTERVAL.toLong(),
+            )
+        } catch (_: RuntimeException) {
+            DEFAULT_INTERVAL_SECONDS
+        }
         executor.schedule({ tick(); scheduleNext() }, delay, TimeUnit.SECONDS)
     }
 

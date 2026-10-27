@@ -11,6 +11,7 @@ import com.canaryagent.model.TrafficChannel
 import com.canaryagent.model.TrafficRef
 import com.canaryagent.util.CanaryLog
 import com.canaryagent.util.Hashing
+import java.util.concurrent.Executor
 
 /** Identity of one WebSocket connection, derived from its upgrade request. */
 data class WebSocketEndpoint(val url: String, val host: String, val path: String, val tool: ToolType) {
@@ -40,8 +41,14 @@ class WebSocketMarkerObserver(
     private val log: CanaryLog,
     /** Whether a frame is agent-shaped traffic, for attribution; consulted only when a frame has hits. */
     private val agentShaped: (String) -> Boolean = { false },
+    /** Runs the recording work that the handler thread does not need to wait for (F-review [3]). */
+    private val executor: Executor = ObservationExecutor.DIRECT,
 ) {
-    /** Scans one frame and records hits per [HitPolicy]. Returns the hits (empty when nothing counted). */
+    /**
+     * Scans one frame and records hits per [HitPolicy]. The hits are found and returned synchronously
+     * (the Proxy handler annotates the frame from them); recording them - the tracker write and the
+     * attribution parse - happens on [executor].
+     */
     fun observe(payload: String, direction: Direction, endpoint: WebSocketEndpoint): List<MarkerMatch> {
         if (tracker.size() == 0) return emptyList()
         return try {
@@ -62,10 +69,16 @@ class WebSocketMarkerObserver(
                 excerpt = payload.take(EXCERPT_CHARS),
                 messageId = "sha:" + payloadHash.take(8),
             )
-            val agentContext = agentShaped(payload)
             val fingerprint = MarkerTracker.fingerprint(channel, "WS", endpoint.url, payloadHash)
-            for (m in hits) {
-                tracker.recordHit(m.token, m.inToolCall, m.encodings, ref, agentContext = agentContext, inToolResult = m.inToolResult, fingerprint = fingerprint)
+            executor.execute {
+                try {
+                    val agentContext = agentShaped(payload)
+                    for (m in hits) {
+                        tracker.recordHit(m.token, m.inToolCall, m.encodings, ref, agentContext = agentContext, inToolResult = m.inToolResult, fingerprint = fingerprint)
+                    }
+                } catch (t: RuntimeException) {
+                    log.error("Recording WebSocket marker hits failed for ${endpoint.url}", t)
+                }
             }
             hits
         } catch (t: RuntimeException) {

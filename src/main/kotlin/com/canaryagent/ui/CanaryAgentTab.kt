@@ -72,5 +72,8 @@ class CanaryAgentTab(
         inventoryRefresh.stop()
         markersRefresh.stop()
         trafficRefresh.stop()
+        inventoryPanel.panel.dispose()
+        markersPanel.panel.dispose()
+        trafficPanel.table.dispose()
     }
 }

@@ -55,4 +55,22 @@ class BodyParserTest {
         assertTrue(parser.parse(Corpus.read("bait_html.txt"), "text/html").isEmpty())
         assertTrue(parser.parse("just some text with = in it\nand a newline", null).isEmpty())
     }
+
+    @Test
+    fun `a precomputed parse is reused instead of parsing again`() {
+        val precomputed = listOf<Any>(JSONObject("""{"shared":true}"""))
+        val roots = parser.parse("""{"a":1}""", "application/json", precomputed)
+        assertEquals(precomputed, roots)
+    }
+
+    @Test
+    fun `gates still apply with a precomputed parse`() {
+        val precomputed = listOf<Any>(JSONObject("""{"shared":true}"""))
+        // Content-type gate: a non-text-like type stays empty whatever was precomputed.
+        assertTrue(parser.parse("""{"a":1}""", "image/png", precomputed).isEmpty())
+        // Form bodies keep their own parse; the precomputed JSON roots do not replace it.
+        val form = parser.parse("a=1&b=2", "application/x-www-form-urlencoded", precomputed)
+        assertEquals(1, form.size)
+        assertEquals("1", (form[0] as JSONObject).getString("a"))
+    }
 }

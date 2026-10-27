@@ -62,6 +62,12 @@ class FilterableTablePanel<T>(
     internal val clearTableButton = JButton("Clear table").apply { addActionListener { onClear() } }
 
     /**
+     * Debounces per-keystroke filter updates so rapid typing compiles one pattern after the pause,
+     * not one per character (exposed for tests, which flush it instead of waiting out the window).
+     */
+    internal val filterCoalescer = RefreshCoalescer { applyFilters() }
+
+    /**
      * Section title with the row count: `Title (49)`, or `Title (12 of 49)` while a filter narrows the
      * view, so the number the Clear dialogs quote can be checked without scrolling (exposed for tests).
      * Plain text with a derived font: Burp's look and feel disables HTML rendering in labels.
@@ -140,14 +146,18 @@ class FilterableTablePanel<T>(
             if (m in 0 until model.rowCount) model.rowAt(m) else null
         }
 
-    /** Sets the filter field text; the row filter follows through the document listener. */
+    /** Sets the filter field text and applies it at once; only keystrokes in the field are debounced. */
     fun setFilterText(text: String) {
         filterField.text = text
+        applyFilters()
     }
 
-    /** Empties the filter field (x button, Esc). */
+    /** Empties the filter field and applies it at once (x button, Esc). */
     fun clearFilter() {
-        if (filterField.text.isNotEmpty()) filterField.text = ""
+        if (filterField.text.isNotEmpty()) {
+            filterField.text = ""
+            applyFilters()
+        }
     }
 
     /** A second filter combined with the text filter (the tool-row narrowing); null removes it. */
@@ -177,9 +187,14 @@ class FilterableTablePanel<T>(
         table.selectionModel.addListSelectionListener { e -> if (!e.valueIsAdjusting) listener(selectedItems()) }
     }
 
+    /** Stops the debounce timer; the owning tab calls this on unload so no timer outlives the extension. */
+    fun dispose() {
+        filterCoalescer.stop()
+    }
+
     private fun filterChanged() {
         clearFilterButton.isVisible = filterField.text.isNotEmpty()
-        applyFilters()
+        filterCoalescer.requestRefresh()
     }
 
     private fun updateTitle() {

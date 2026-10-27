@@ -38,6 +38,8 @@ class TrafficAnnotator(
     private val inventory: ToolInventory,
     private val store: AnnotatedTrafficStore,
     private val settings: AnnotationSettings,
+    /** Memoizes the message-level [analyze] overloads (F-review [4]); the handler fills it, menus read it. */
+    private val cache: AnalysisCache = AnalysisCache(),
 ) {
     companion object {
         const val NOTE_PREFIX = "CanaryAgent:"
@@ -90,9 +92,12 @@ class TrafficAnnotator(
         }
     }
 
-    /** Analyses one body. [path] is only used for the path-fragment heuristic. */
-    fun analyze(body: String, contentType: String?, path: String?): MessageAnalysis {
-        val roots = parser.parse(body, contentType)
+    /**
+     * Analyses one body. [path] is only used for the path-fragment heuristic. [fragments] shares a
+     * parse already done on this body (F-review [2]); analysis is unchanged by it.
+     */
+    fun analyze(body: String, contentType: String?, path: String?, fragments: List<Any>? = null): MessageAnalysis {
+        val roots = parser.parse(body, contentType, fragments)
         if (roots.isEmpty()) return MessageAnalysis.NONE
         val detection = detector.detect(roots, path)
         if (!detection.isAgentRelated) return MessageAnalysis.NONE
@@ -106,13 +111,29 @@ class TrafficAnnotator(
     fun isAgentShaped(body: String, contentType: String?, path: String?): Boolean =
         analyze(body, contentType, path).isAgentRelated
 
-    /** Analyses a request body with its Content-Type and path. */
-    fun analyze(request: HttpRequest): MessageAnalysis =
-        analyze(request.bodyToString(), request.headerValue("Content-Type"), request.path())
+    /**
+     * Analyses a request body with its Content-Type and path; [fragments] shares an existing parse.
+     * Memoized by message content, so a later call for the same message (the context menu, a repeated
+     * poll) is a lookup, not a parse.
+     */
+    fun analyze(request: HttpRequest, fragments: List<Any>? = null): MessageAnalysis {
+        val body = request.bodyToString()
+        val contentType = request.headerValue("Content-Type")
+        val path = request.path()
+        return cache.getOrCompute(cacheKey(body, contentType, path)) { analyze(body, contentType, path, fragments) }
+    }
 
-    /** Analyses a response body; the initiating [request] supplies the path for the agent-path signal. */
-    fun analyze(response: HttpResponse, request: HttpRequest?): MessageAnalysis =
-        analyze(response.bodyToString(), response.headerValue("Content-Type"), request?.path())
+    /** Analyses a response body; the initiating [request] supplies the path for the agent-path signal. Memoized. */
+    fun analyze(response: HttpResponse, request: HttpRequest?, fragments: List<Any>? = null): MessageAnalysis {
+        val body = response.bodyToString()
+        val contentType = response.headerValue("Content-Type")
+        val path = request?.path()
+        return cache.getOrCompute(cacheKey(body, contentType, path)) { analyze(body, contentType, path, fragments) }
+    }
+
+    /** Analysis is a pure function of body, Content-Type and path; the key hashes exactly those. */
+    private fun cacheKey(body: String, contentType: String?, path: String?): String =
+        Hashing.sha256Hex(body) + '|' + (contentType ?: "") + '|' + (path ?: "")
 
     /** Whether automatic matching applies to this request. Markers are never affected by this. */
     fun shouldAutoAnnotate(inScope: Boolean): Boolean =

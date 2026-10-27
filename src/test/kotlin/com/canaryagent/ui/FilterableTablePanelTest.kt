@@ -112,6 +112,26 @@ class FilterableTablePanelTest {
     }
 
     @Test
+    fun `typed keystrokes are debounced through the coalescer, not applied per character`() {
+        panel.reload(rows)
+        // Simulate typing: a document insert, as a keystroke produces, not setFilterText.
+        panel.filterField.document.insertString(0, "beta", null)
+        // The x button follows the text immediately; the pattern compile waits for the pause.
+        assertTrue(panel.clearFilterButton.isVisible)
+        assertEquals(3, panel.table.rowCount, "filter must not apply synchronously on a keystroke")
+        javax.swing.SwingUtilities.invokeAndWait { panel.filterCoalescer.refreshNow() }
+        assertEquals(1, panel.table.rowCount, "filter applies once the coalescer fires")
+    }
+
+    @Test
+    fun `dispose stops the pending debounce`() {
+        panel.reload(rows)
+        panel.filterField.document.insertString(0, "beta", null)
+        panel.dispose()
+        assertEquals(3, panel.table.rowCount)
+    }
+
+    @Test
     fun `clear table button calls back`() {
         val button = panel.components.flatMap { (it as? javax.swing.JPanel)?.components?.toList() ?: emptyList() }
             .filterIsInstance<javax.swing.JButton>().first { it.text == "Clear table" }

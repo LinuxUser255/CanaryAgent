@@ -63,16 +63,32 @@ class MarkerScanner(
      */
     fun scan(text: String, structuredBody: String? = null): List<MarkerMatch> {
         if (text.isEmpty()) return emptyList()
+        val capped = if (text.length > maxChars) text.substring(0, maxChars) else text
+        return scan(
+            text,
+            lazy {
+                val body = structuredBody?.let { if (it.length > maxChars) it.substring(0, maxChars) else it } ?: capped
+                JsonSupport.parseFragments(body)
+            },
+        )
+    }
+
+    /**
+     * Variant for callers that share one parse between scanning and annotation (F-review [2]):
+     * [fragments] holds the parsed roots of the structured body and is only forced when the text
+     * actually contains a tracked token, so a message without markers costs no parse here.
+     */
+    fun scan(text: String, fragments: Lazy<List<Any>>): List<MarkerMatch> {
+        if (text.isEmpty()) return emptyList()
         if (index.prefixedTokenLengths().isEmpty() && index.customTokens().isEmpty()) return emptyList()
         val capped = if (text.length > maxChars) text.substring(0, maxChars) else text
 
         val found = tokensIn(capped)
         if (found.isEmpty()) return emptyList()
 
-        val body = structuredBody?.let { if (it.length > maxChars) it.substring(0, maxChars) else it } ?: capped
-        val fragments = JsonSupport.parseFragments(body)
-        val inToolCall = classifyToolCall(fragments, found.keys)
-        val inToolResult = classifyToolResult(fragments, found.keys)
+        val roots = fragments.value
+        val inToolCall = classifyToolCall(roots, found.keys)
+        val inToolResult = classifyToolResult(roots, found.keys)
         return found.map { (token, enc) -> MarkerMatch(token, enc, token in inToolCall, token in inToolResult) }
     }
 

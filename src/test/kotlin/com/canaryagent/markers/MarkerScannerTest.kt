@@ -222,4 +222,24 @@ class MarkerScannerTest {
         assertTrue(small.scan("x".repeat(100) + token).isEmpty())
         assertEquals(1, small.scan(token + "x".repeat(200)).size)
     }
+
+    @Test
+    fun `shared fragments drive classification, not the raw text`() {
+        val body = """{"tool_calls":[{"function":{"name":"x","arguments":"{\"q\":\"cnry7f3a9k2m\"}"}}]}"""
+        val message = "POST /post HTTP/1.1\r\nHost: httpbin.org\r\nContent-Type: application/json\r\n\r\n$body"
+        // The headers in front of the JSON defeat a parse of the message text; a scan that ignored the
+        // shared fragments and re-parsed the text would classify this as a plain sighting.
+        val fromFragments = scanner.scan(message, lazy { com.canaryagent.util.JsonSupport.parseFragments(body) }).single()
+        assertTrue(fromFragments.inToolCall, "classification must come from the shared fragments")
+        val fromEmpty = scanner.scan(message, lazy { emptyList<Any>() }).single()
+        assertFalse(fromEmpty.inToolCall, "empty shared fragments must mean no tool-call context")
+    }
+
+    @Test
+    fun `shared fragments are not forced when no marker is present`() {
+        var forced = false
+        val matches = scanner.scan("""{"text":"no markers here"}""", lazy { forced = true; emptyList<Any>() })
+        assertTrue(matches.isEmpty())
+        assertFalse(forced, "a message without markers must not pay for a parse")
+    }
 }

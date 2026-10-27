@@ -10,6 +10,7 @@ import com.canaryagent.collaborator.CollaboratorPoller
 import com.canaryagent.collaborator.CollaboratorService
 import com.canaryagent.contextmenu.CanaryAgentContextMenuProvider
 import com.canaryagent.handlers.HttpObservationHandler
+import com.canaryagent.handlers.ObservationExecutor
 import com.canaryagent.handlers.ProxyWebSocketObservationHandler
 import com.canaryagent.handlers.WebSocketMarkerObserver
 import com.canaryagent.handlers.WebSocketObservationHandler
@@ -18,8 +19,10 @@ import com.canaryagent.inventory.ToolInventoryLogger
 import com.canaryagent.markers.MarkerHitLogger
 import com.canaryagent.markers.MarkerScanner
 import com.canaryagent.markers.MarkerTracker
+import burp.api.montoya.scanner.scancheck.ScanCheckType
 import com.canaryagent.persistence.MontoyaNode
 import com.canaryagent.persistence.PersistenceService
+import com.canaryagent.scanner.MarkerPassiveScanCheck
 import com.canaryagent.settings.AnnotationSettings
 import com.canaryagent.settings.CanaryAgentSettings
 import com.canaryagent.ui.CanaryAgentTab
@@ -47,6 +50,7 @@ class CanaryAgentRuntime private constructor(
     private val poller: CollaboratorPoller?,
     private val tab: CanaryAgentTab,
     val persistence: PersistenceService?,
+    private val observationExecutor: ObservationExecutor,
 ) {
     companion object {
         const val EXTENSION_NAME = "CanaryAgent"
@@ -84,10 +88,21 @@ class CanaryAgentRuntime private constructor(
             val persistence = startPersistence(api, tracker, inventory, log) { settings.persistenceEnabled }
             inventory.addListener(ToolInventoryLogger(log))
 
-            val wsObserver = WebSocketMarkerObserver(tracker, scanner, log) { payload -> annotator.isAgentShaped(payload, null, null) }
-            api.http().registerHttpHandler(HttpObservationHandler(tracker, scanner, annotator, log))
+            // Off-handler lane for tracker/store/inventory writes (F-review [3]): the handlers return as
+            // soon as the annotations are composed; recording degrades to inline under load, never drops.
+            val observationExecutor = ObservationExecutor()
+            val wsObserver = WebSocketMarkerObserver(tracker, scanner, log, { payload -> annotator.isAgentShaped(payload, null, null) }, observationExecutor)
+            api.http().registerHttpHandler(HttpObservationHandler(tracker, scanner, annotator, log, executor = observationExecutor))
             api.websockets().registerWebSocketCreatedHandler(WebSocketObservationHandler(wsObserver))
             api.proxy().registerWebSocketCreationHandler(ProxyWebSocketObservationHandler(wsObserver))
+
+            // Additive Scanner integration (Professional): audit issues for marker hits. Detection never
+            // depends on it - the handlers above observe all traffic on every edition. Read-only against
+            // the tracker, so audits cannot inflate hit counts.
+            if (capabilities.scannerAvailable) {
+                api.scanner().registerPassiveScanCheck(MarkerPassiveScanCheck(tracker, scanner, log), ScanCheckType.PER_REQUEST)
+                log.info("Scanner integration: passive check registered; audits report marker hits as issues.")
+            }
 
             // Collaborator is Professional-only; on Community the service is null and its actions are hidden.
             // The client key lives in the project so a reload restores the same client and keeps fetching
@@ -119,7 +134,7 @@ class CanaryAgentRuntime private constructor(
             api.userInterface().registerSuiteTab(EXTENSION_NAME, tab.component)
 
             val runtime = CanaryAgentRuntime(
-                api, log, capabilities, settings, annotationSettings, tracker, scanner, inventory, traffic, annotator, collaborator, poller, tab, persistence,
+                api, log, capabilities, settings, annotationSettings, tracker, scanner, inventory, traffic, annotator, collaborator, poller, tab, persistence, observationExecutor,
             )
             api.extension().registerUnloadingHandler { runtime.dispose() }
             warnIfStreamingHidesSse(api, log)
@@ -168,6 +183,7 @@ class CanaryAgentRuntime private constructor(
     fun dispose() {
         persistence?.dispose()
         poller?.dispose()
+        observationExecutor.dispose()
         tab.dispose()
         tracker.clear()
         inventory.clear()

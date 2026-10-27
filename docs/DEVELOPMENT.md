@@ -40,7 +40,7 @@ plugins {
 }
 
 group = "com.canaryagent"
-version = "1.0.0"
+version = "1.1.0"
 
 repositories {
     mavenCentral()
@@ -110,7 +110,7 @@ You can reorganize packages as the code evolves. Keep the entry point class that
 - Navigate to `Tasks → shadow → shadowJar` and double-click it
 
 Output JAR:  
-`build/libs/canaryagent-1.0.0-all.jar`
+`build/libs/canaryagent-1.1.0-all.jar`
 
 ### In-Burp self-test (dev only)
 

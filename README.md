@@ -77,13 +77,17 @@ Click any image to open it at full size.
   rows get a highlight and a note: orange for strong, yellow for medium, red for a marker hit.
 - **Tool Inventory.** Tool names and the parameter or argument keys that were visible, counted once per
   message, with first/last seen and source URL.
+- **Scanner issues (Professional).** A passive scan check reports marker findings in Burp's issue list:
+  High for a marker inside a tool call, Medium for one inside a tool result, Informational for a plain
+  resurfacing. Detection itself never depends on the Scanner - markers are tracked by the traffic
+  handlers on every edition, including WebSocket traffic the Scanner never sees.
 - **CanaryAgent tab.** Tool Inventory, Marker Hits and Annotated Traffic in one suite tab. Filter and sort
   each table, select a tool to narrow the traffic to it, view the selected request and response read-only,
   and double-click to send to Repeater. The tab never edits messages.
 
 ## Install
 
-1. Build the JAR (below) or take `build/libs/canaryagent-1.0.0-all.jar`.
+1. Build the JAR (below) or take `build/libs/canaryagent-1.1.0-all.jar`.
 2. Burp → **Extensions** → **Installed** → **Add** → type **Java** → select the JAR.
 3. The Output tab logs a startup line and a hint about proxying your backend.
 
@@ -123,7 +127,7 @@ Settings → Extensions → CanaryAgent (saved per project):
   they usually reappear on LLM provider hosts outside your scope.
 - **Do not persist markers and tool inventory in the project**: off by default, so state is saved. Ticked
   stops saving immediately; what is already stored still comes back at load until you press Clear table.
-- **Collaborator polling interval**: 10 seconds by default, read before every poll.
+- **Collaborator polling interval**: 30 seconds by default, read before every poll.
 
 All settings take effect immediately; nothing needs a reload.
 
@@ -167,7 +171,7 @@ runs on Burp's bundled runtime.
 
 ```bash
 ./gradlew test          # unit tests, no Burp needed
-./gradlew shadowJar     # build/libs/canaryagent-1.0.0-all.jar
+./gradlew shadowJar     # build/libs/canaryagent-1.1.0-all.jar
 ```
 
 ## Documentation

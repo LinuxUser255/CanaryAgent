@@ -116,6 +116,15 @@ use **Annotated Traffic** in the tab. The note on the row names the marker and t
 `(tool call)`. In the request or response body, the marker sits inside a `role: tool` message (delivery) or
 a `tool_calls[].arguments` string (steering).
 
+**Scanner issues (Professional).** The same findings also appear in Burp's issue list: Burp's passive
+scanning of Proxy traffic runs the check, and so does any audit you start on the flagged messages. A
+marker inside a tool call raises a High-severity issue, a tool result Medium, a plain resurfacing
+Informational. Nothing requires this: the Marker Hits table above is always the complete picture, on
+both editions, scanned or not.
+
+**Collaborator timing.** Interactions are fetched on the polling interval (30 seconds by default), so an
+out-of-band hit can take up to that long to appear after the agent makes its call.
+
 ## Phase 4: escalate in Repeater
 
 Once a path works from the browser, Repeater lets you iterate on the injection without re-driving the whole

@@ -32,7 +32,7 @@ plugins {
 }
 
 group = "com.canaryagent"
-version = "1.0.0"
+version = "1.1.0"
 
 repositories { mavenCentral() }
 
@@ -59,7 +59,7 @@ tasks.test { useJUnitPlatform() }
 ```
 
 **Build command**: `./gradlew shadowJar`  
-**Output**: `build/libs/canaryagent-1.0.0-all.jar` (name fixed by `archiveBaseName`)  
+**Output**: `build/libs/canaryagent-1.1.0-all.jar` (name fixed by `archiveBaseName`)  
 Load in Burp as a Java extension.
 
 Remote debugging: add `-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:5005` to Burp's `user.vmoptions` and attach from IntelliJ. **Bind to `127.0.0.1` only** — JDWP is unauthenticated remote code execution.
@@ -339,7 +339,7 @@ Recorded as the code lands; see git history for details.
   from the key stored in the project (`restoreIfStored()` at load, before the poller starts) or creates it
   lazily and queues the new key through `PersistenceService`; the pure `ClientBootstrap.resolve` holds the
   restore-or-create decision. It goes unavailable after one failure (Collaborator disabled). `CollaboratorPoller` runs a daemon
-  `ScheduledExecutorService` (10 s fixed delay) and hands interactions to the pure `CollaboratorCorrelator`.
+  `ScheduledExecutorService` (30 s fixed delay) and hands interactions to the pure `CollaboratorCorrelator`.
   New `MarkerStatus.OOB_INTERACTION` ranks above tool call; new `TrafficChannel.COLLABORATOR("oob")` is
   inbound, so `HitPolicy` always counts it. Each interaction also carries an `Attribution` label
   (`browser-attributed` / `agent-attributed` / `unattributed`) with the signals that produced it, computed by
@@ -362,7 +362,8 @@ Recorded as the code lands; see git history for details.
 - **Streaming** (`annotation/StreamingCheck`): an SSE body that is empty or lacks the terminating blank
   line, or an empty chunked text body, is taken as "arrived before the server finished"; the HTTP handler
   logs one warning with the workaround and still scans what it has. The Collaborator polling interval is
-  a project setting (5–300 s, read at load).
+  a project setting (30–300 s, read live before every poll; the 30 s floor is PortSwigger's recommended
+  minimum against unnecessary Collaborator server load).
 - **Origin exclusion** is endpoint + body hash (`MarkerOrigin.bodyHash`), never endpoint alone: LLM APIs
   reuse one path every turn, so only the exact message the marker was inserted into is excluded.
 - **`CanaryAgentRuntime`** holds all wiring; `CanaryAgentExtension` is a two-line shell. A dev-only
@@ -373,3 +374,28 @@ Recorded as the code lands; see git history for details.
 - **Context menu**: "Mark as agent content" works on the open editor or selected history rows (≤ 50);
   "Send to Repeater as tool: X" sends the original request with a named tab; "Copy tool snippet"
   copies `name(key, key)` lines. Menu-time parsing is capped at 256 KB per body to keep the EDT responsive.
+
+### Extension-portal review changes (issue #570, 2026-10-27)
+
+- **`MarkerPassiveScanCheck`** (`scanner/`): additive `PassiveScanCheck` (PER_REQUEST), registered on
+  Professional only (`Capabilities.scannerAvailable`). Raises audit issues per ladder rung (High: tool
+  call; Medium: tool result; Informational: resurfaced). Headless self-test F1 showed Burp invoking it for
+  plain Proxy traffic in a fresh project with no audit task; F2 covers an explicit passive audit.
+  **Read-only against `MarkerTracker`** - the handlers stay the sole writers, so audits cannot inflate
+  hit counts, and detection never depends on the Scanner (Community, non-audited traffic and WebSocket
+  stay fully covered). `consolidateIssues` collapses the same rung + marker set per URL (KEEP_NEW, so the
+  detail stays fresh).
+- **One parse per message body**: the HTTP handler computes `JsonSupport.parseFragments` once, lazily,
+  and shares it with `MarkerScanner.scan(text, Lazy)` and `TrafficAnnotator.analyze(..., fragments)`;
+  `BodyParser.parse` takes the precomputed roots without changing any gate. A message without markers and
+  without annotation work still parses nothing.
+- **`ObservationExecutor`** (`handlers/`): one bounded daemon thread for the work the returned
+  annotations do not depend on (tracker hits, store rows, inventory, attribution analysis). Caller-runs
+  on overflow and after dispose, so recording degrades to inline rather than dropping anything.
+  Annotation composition (scan, heuristics for the note/highlight) stays synchronous by design: Montoya
+  handlers must return the annotations. Deferred closures capture only strings, immutable models and
+  `copyToTempFile()` copies. Disposed in `CanaryAgentRuntime.dispose()`.
+- **`AnalysisCache`** (`annotation/`): bounded memoization of `TrafficAnnotator.analyze` message
+  overloads, keyed by body hash + Content-Type + path. The handler fills it as traffic flows; the context
+  menu's analyze calls become lookups (a handler-unseen message still parses once on first right-click,
+  capped at 256 KB as before).

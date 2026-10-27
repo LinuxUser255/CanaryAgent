@@ -19,7 +19,9 @@ import com.canaryagent.model.TrafficChannel
 import com.canaryagent.model.TrafficRef
 import com.canaryagent.util.CanaryLog
 import com.canaryagent.util.Hashing
+import com.canaryagent.util.JsonSupport
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executor
 
 /**
  * Observes every HTTP message Burp sends or receives (all tools, all scopes).
@@ -34,10 +36,27 @@ class HttpObservationHandler(
     private val annotator: TrafficAnnotator,
     private val log: CanaryLog,
     private val maxBodyBytes: Int = MarkerScanner.DEFAULT_MAX_CHARS,
+    /** Runs work the returned annotations do not depend on (F-review [3]); direct in tests. */
+    private val executor: Executor = ObservationExecutor.DIRECT,
 ) : HttpHandler {
 
     /** Request-side analysis awaiting its response, keyed by message id. Bounded crudely. */
     private val pending = ConcurrentHashMap<Int, MessageAnalysis>()
+
+    /**
+     * Defers [work] to the executor. Everything it touches must already be captured: plain strings,
+     * immutable models, `copyToTempFile()` copies and the shared parse - never a live handler object,
+     * which Burp may invalidate once the handler returns.
+     */
+    private fun defer(what: String, work: () -> Unit) {
+        executor.execute {
+            try {
+                work()
+            } catch (t: RuntimeException) {
+                log.error("Deferred observation work failed: $what", t)
+            }
+        }
+    }
 
     // Both stages return the plain `continueWith(message)` ("annotations will not be modified") unless
     // something was actually added.
@@ -46,9 +65,14 @@ class HttpObservationHandler(
         val original = request.annotations()
         var annotations = original
         try {
-            val hits = observeMarkersInRequest(request)
+            // One parse per message, shared by marker classification and annotation (F-review [2]);
+            // lazy, so a message that triggers neither never parses. Null when the body is over the cap.
+            val parsed = if (request.body().length() <= maxBodyBytes) {
+                lazy { JsonSupport.parseFragments(request.bodyToString()) }
+            } else null
+            val hits = observeMarkersInRequest(request, parsed)
             annotations = annotateRequestHits(request, hits, annotations)
-            annotations = annotateRequest(request, annotations)
+            annotations = annotateRequest(request, annotations, parsed)
         } catch (t: RuntimeException) {
             log.error("Observation failed for request ${request.url()}", t)
         }
@@ -61,8 +85,12 @@ class HttpObservationHandler(
         var annotations = original
         try {
             warnIfStreamedTruncated(response)
-            val hits = observeMarkersInResponse(response)
-            annotations = annotateResponse(response, hits, annotations)
+            // Shared parse, as on the request side. Null when the response is binary or over the cap.
+            val parsed = if (!isBinary(response.inferredMimeType()) && response.body().length() <= maxBodyBytes) {
+                lazy { JsonSupport.parseFragments(response.bodyToString()) }
+            } else null
+            val hits = observeMarkersInResponse(response, parsed)
+            annotations = annotateResponse(response, hits, annotations, parsed)
         } catch (t: RuntimeException) {
             log.error("Observation failed for response to ${response.initiatingRequest().url()}", t)
         }
@@ -73,16 +101,15 @@ class HttpObservationHandler(
     // ---- markers -------------------------------------------------------------------------------
 
     /** Records request-side hits per [HitPolicy]; returns the hits that counted (empty when none). */
-    private fun observeMarkersInRequest(request: HttpRequestToBeSent): List<MarkerMatch> {
+    private fun observeMarkersInRequest(request: HttpRequestToBeSent, parsed: Lazy<List<Any>>?): List<MarkerMatch> {
         if (tracker.size() == 0) return emptyList()
         val tool = request.toolSource().toolType()
         // Outbound traffic from user-driven tools is the user re-sending their own marker; only the
         // Proxy can produce request-side hits, and never for the request the marker was inserted into.
         if (!HitPolicy.shouldCount(TrafficChannel.HTTP_REQUEST, tool, isOrigin = false)) return emptyList()
 
-        val bodySmall = request.body().length() <= maxBodyBytes
-        val text = if (bodySmall) request.toString() else headersOnly(request)
-        val matches = scanner.scan(text, if (bodySmall) request.bodyToString() else null)
+        val text = if (parsed != null) request.toString() else headersOnly(request)
+        val matches = if (parsed != null) scanner.scan(text, parsed) else scanner.scan(text)
         if (matches.isEmpty()) return emptyList()
 
         val method = request.method()
@@ -101,12 +128,19 @@ class HttpObservationHandler(
             request = request.copyToTempFile(),
             messageId = "#${request.messageId()}",
         )
-        // Only reached with a marker in the message, so the parse is rare. Bodies over the cap were not scanned.
-        val agentShaped = bodySmall && annotator.analyze(request).isAgentRelated
         // F8: the same body to the same URL again (a retry, a replayed form) does not raise the hit count.
         val fingerprint = MarkerTracker.fingerprint(TrafficChannel.HTTP_REQUEST, method, request.url(), bodyHash)
-        for (m in hits) {
-            tracker.recordHit(m.token, m.inToolCall, m.encodings, ref, agentContext = agentShaped, inToolResult = m.inToolResult, fingerprint = fingerprint)
+        // Captured now; the deferred work must not touch the live request. The scan already forced the
+        // shared parse, so forcing it again below is free.
+        val body = if (parsed != null) request.bodyToString() else null
+        val contentType = request.headerValue("Content-Type")
+        val requestPath = request.path()
+        defer("request marker hits") {
+            val agentShaped = parsed != null && body != null &&
+                annotator.analyze(body, contentType, requestPath, parsed.value).isAgentRelated
+            for (m in hits) {
+                tracker.recordHit(m.token, m.inToolCall, m.encodings, ref, agentContext = agentShaped, inToolResult = m.inToolResult, fingerprint = fingerprint)
+            }
         }
         return hits
     }
@@ -120,18 +154,21 @@ class HttpObservationHandler(
         if (hits.isEmpty()) return annotations
         val note = TrafficAnnotator.markerHitNote(hits)
         val tool = request.toolSource().toolType().toString()
-        annotator.recordTraffic(tool, request, null, note, AnnotationSource.MARKER_HIT, "#${request.messageId()}")
+        val requestCopy = request.copyToTempFile()
+        val messageKey = "#${request.messageId()}"
+        defer("request hit row") { annotator.recordTraffic(tool, requestCopy, null, note, AnnotationSource.MARKER_HIT, messageKey) }
         return annotator.annotate(annotations, note, TrafficAnnotator.MARKER_COLOR)
     }
 
-    private fun observeMarkersInResponse(response: HttpResponseReceived): List<MarkerMatch> {
+    private fun observeMarkersInResponse(response: HttpResponseReceived, parsed: Lazy<List<Any>>?): List<MarkerMatch> {
         if (tracker.size() == 0) return emptyList()
-        if (isBinary(response.inferredMimeType())) return emptyList()
-        if (response.body().length() > maxBodyBytes) {
-            log.once("resp-too-large", "Skipping marker scan of responses larger than $maxBodyBytes bytes.")
+        if (parsed == null) {
+            if (!isBinary(response.inferredMimeType())) {
+                log.once("resp-too-large", "Skipping marker scan of responses larger than $maxBodyBytes bytes.")
+            }
             return emptyList()
         }
-        val matches = scanner.scan(response.toString(), response.bodyToString())
+        val matches = scanner.scan(response.toString(), parsed)
         if (matches.isEmpty()) return emptyList()
 
         val initiating = response.initiatingRequest()
@@ -145,34 +182,48 @@ class HttpObservationHandler(
             response = response.copyToTempFile(),
             messageId = "#${response.messageId()}",
         )
-        // A response belongs to the agent pipeline when it, or the request it answers, is agent-shaped.
-        val agentShaped = annotator.analyze(response, initiating).isAgentRelated ||
-            (initiating.body().length() <= maxBodyBytes && annotator.analyze(initiating).isAgentRelated)
         // F8: a poll or page reload returning the same body for the same URL does not raise the hit count.
         val fingerprint = MarkerTracker.fingerprint(
             TrafficChannel.HTTP_RESPONSE, initiating.method(), initiating.url(), Hashing.sha256Hex(response.body().bytes),
         )
-        for (m in matches) {
-            tracker.recordHit(m.token, m.inToolCall, m.encodings, ref, agentContext = agentShaped, inToolResult = m.inToolResult, fingerprint = fingerprint)
+        // Captured now; the deferred work must not touch the live messages (scan already forced the parse).
+        val respBody = response.bodyToString()
+        val respContentType = response.headerValue("Content-Type")
+        val reqPath = initiating.path()
+        val reqBody = if (initiating.body().length() <= maxBodyBytes) initiating.bodyToString() else null
+        val reqContentType = initiating.headerValue("Content-Type")
+        defer("response marker hits") {
+            // A response belongs to the agent pipeline when it, or the request it answers, is agent-shaped.
+            val agentShaped = annotator.analyze(respBody, respContentType, reqPath, parsed.value).isAgentRelated ||
+                (reqBody != null && annotator.analyze(reqBody, reqContentType, reqPath).isAgentRelated)
+            for (m in matches) {
+                tracker.recordHit(m.token, m.inToolCall, m.encodings, ref, agentContext = agentShaped, inToolResult = m.inToolResult, fingerprint = fingerprint)
+            }
         }
         return matches
     }
 
     // ---- heuristics + inventory ----------------------------------------------------------------
 
-    private fun annotateRequest(request: HttpRequestToBeSent, annotations: Annotations): Annotations {
+    private fun annotateRequest(request: HttpRequestToBeSent, annotations: Annotations, parsed: Lazy<List<Any>>?): Annotations {
         if (!annotator.shouldAutoAnnotate(request.isInScope)) return annotations
-        if (request.body().length() > maxBodyBytes) return annotations
-        val analysis = annotator.analyze(request)
+        if (parsed == null) return annotations
+        val analysis = annotator.analyze(request, parsed.value)
         if (!analysis.isAgentRelated) return annotations
 
-        annotator.recordTools(analysis, request.url())
+        val url = request.url()
+        defer("request inventory") { annotator.recordTools(analysis, url) }
         if (pending.size > MAX_PENDING) pending.clear()
         pending[request.messageId()] = analysis
         return annotator.annotate(annotations, annotator.noteFor(analysis), annotator.colorFor(analysis))
     }
 
-    private fun annotateResponse(response: HttpResponseReceived, hits: List<MarkerMatch>, annotations: Annotations): Annotations {
+    private fun annotateResponse(
+        response: HttpResponseReceived,
+        hits: List<MarkerMatch>,
+        annotations: Annotations,
+        parsed: Lazy<List<Any>>?,
+    ): Annotations {
         val request = response.initiatingRequest()
         val tool = response.toolSource().toolType().toString()
         // Both notes below land on the same Annotated Traffic row (and the same Proxy note).
@@ -181,21 +232,26 @@ class HttpObservationHandler(
 
         if (hits.isNotEmpty()) {
             val note = TrafficAnnotator.markerHitNote(hits)
-            annotator.recordTraffic(tool, request, response, note, AnnotationSource.MARKER_HIT, messageKey)
+            val requestCopy = request.copyToTempFile()
+            val responseCopy = response.copyToTempFile()
+            defer("response hit row") { annotator.recordTraffic(tool, requestCopy, responseCopy, note, AnnotationSource.MARKER_HIT, messageKey) }
             result = annotator.annotate(result, note, TrafficAnnotator.MARKER_COLOR)
         }
 
         val fromRequest = pending.remove(response.messageId())
         if (!annotator.shouldAutoAnnotate(request.isInScope)) return result
-        if (isBinary(response.inferredMimeType()) || response.body().length() > maxBodyBytes) return result
+        if (parsed == null) return result
 
-        val own = annotator.analyze(response, request)
-        if (own.isAgentRelated) annotator.recordTools(own, request.url())
+        val own = annotator.analyze(response, request, parsed.value)
+        val url = request.url()
+        if (own.isAgentRelated) defer("response inventory") { annotator.recordTools(own, url) }
         val combined = fromRequest?.merge(own) ?: own
         if (!combined.isAgentRelated) return result
 
         val note = annotator.noteFor(combined)
-        annotator.recordTraffic(tool, request, response, note, AnnotationSource.AUTO, messageKey)
+        val requestCopy = request.copyToTempFile()
+        val responseCopy = response.copyToTempFile()
+        defer("auto row") { annotator.recordTraffic(tool, requestCopy, responseCopy, note, AnnotationSource.AUTO, messageKey) }
         return annotator.annotate(result, note, annotator.colorFor(combined))
     }
 
